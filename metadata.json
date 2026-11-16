@@ -1,0 +1,6 @@
+{
+  "name": "VozLivro",
+  "description": "Transforme PDFs e eBooks em audiolivros com voz natural, divisão automática de capítulos por IA, controle de velocidade e modo escuro para leitura noturna.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
