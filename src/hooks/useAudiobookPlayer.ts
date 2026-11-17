@@ -11,11 +11,20 @@ interface UseAudiobookPlayerOptions {
   onBookUpdated: (book: Book) => void;
 }
 
+class TtsQuotaError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TtsQuotaError";
+  }
+}
+
 export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions) {
   const [activeBook, setActiveBook] = useState<Book | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isQuotaError, setIsQuotaError] = useState(false);
+  const [useDeviceVoice, setUseDeviceVoice] = useState(false);
   const [segmentCurrentTime, setSegmentCurrentTime] = useState(0);
   const [segmentDuration, setSegmentDuration] = useState(0);
 
@@ -23,11 +32,21 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
   const blobUrlCacheRef = useRef<Map<string, string>>(new Map());
   const inFlightRef = useRef<Map<string, Promise<string>>>(new Map());
   const playbackTokenRef = useRef(0);
+  const prefetchTimerRef = useRef<number | null>(null);
+  const quotaExhaustedRef = useRef(false);
+  const useDeviceVoiceRef = useRef(false);
   const activeBookRef = useRef<Book | null>(null);
   const isPlayingRef = useRef(false);
 
   activeBookRef.current = activeBook;
   isPlayingRef.current = isPlaying;
+  useDeviceVoiceRef.current = useDeviceVoice;
+
+  const stopDeviceSpeech = useCallback(() => {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+  }, []);
 
   useEffect(() => {
     const audio = new Audio();
@@ -35,6 +54,10 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
     audioRef.current = audio;
 
     return () => {
+      if (prefetchTimerRef.current !== null) {
+        window.clearTimeout(prefetchTimerRef.current);
+      }
+      stopDeviceSpeech();
       audio.pause();
       audio.src = "";
       for (const url of blobUrlCacheRef.current.values()) {
@@ -42,7 +65,7 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
       }
       blobUrlCacheRef.current.clear();
     };
-  }, []);
+  }, [stopDeviceSpeech]);
 
   const persistProgress = useCallback(
     (updated: Book) => {
@@ -99,9 +122,14 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
           } catch {
             // Keep default message
           }
+          if (res.status === 429) {
+            quotaExhaustedRef.current = true;
+            throw new TtsQuotaError(errMsg);
+          }
           throw new Error(errMsg);
         }
 
+        quotaExhaustedRef.current = false;
         const wavBlob = await res.blob();
         await setCachedAudioBlob(key, wavBlob);
         const url = URL.createObjectURL(wavBlob);
@@ -120,7 +148,13 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
   );
 
   const prefetchNext = useCallback(
-    (book: Book, chapterIdx: number, segmentIdx: number) => {
+    (book: Book, chapterIdx: number, segmentIdx: number, token: number) => {
+      if (prefetchTimerRef.current !== null) {
+        window.clearTimeout(prefetchTimerRef.current);
+      }
+
+      if (quotaExhaustedRef.current || useDeviceVoiceRef.current) return;
+
       const chapter = book.chapters[chapterIdx];
       if (!chapter) return;
 
@@ -133,12 +167,96 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
       }
 
       if (nextCh < book.chapters.length) {
-        void fetchSegmentUrl(book, nextCh, nextSeg, book.voiceName).catch(() => {
-          // Prefetch failure is non-blocking; foreground play handles errors
-        });
+        prefetchTimerRef.current = window.setTimeout(() => {
+          if (
+            playbackTokenRef.current !== token ||
+            !isPlayingRef.current ||
+            quotaExhaustedRef.current ||
+            useDeviceVoiceRef.current
+          ) {
+            return;
+          }
+          void fetchSegmentUrl(book, nextCh, nextSeg, book.voiceName).catch(
+            () => {
+              // Prefetch failure is non-blocking; foreground play handles errors
+            }
+          );
+        }, 10000);
       }
     },
     [fetchSegmentUrl]
+  );
+
+  const speakWithDeviceVoice = useCallback(
+    (
+      book: Book,
+      chapterIdx: number,
+      segmentIdx: number,
+      shouldAutoPlay: boolean,
+      token: number,
+      onAdvance: (nextBook: Book, nextCh: number, nextSeg: number) => void
+    ) => {
+      stopDeviceSpeech();
+      setIsBuffering(false);
+
+      if (!shouldAutoPlay) {
+        setIsPlaying(false);
+        return;
+      }
+
+      if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+        setError("Síntese de voz do navegador não suportada neste dispositivo.");
+        setIsPlaying(false);
+        return;
+      }
+
+      const chapter = book.chapters[chapterIdx];
+      const text = chapter?.segments[segmentIdx];
+      if (!chapter || !text) {
+        setIsPlaying(false);
+        return;
+      }
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = "pt-BR";
+      utterance.rate = book.playbackSpeed;
+
+      const voices = window.speechSynthesis.getVoices();
+      const ptVoice = voices.find((v) =>
+        v.lang.toLowerCase().startsWith("pt")
+      );
+      if (ptVoice) utterance.voice = ptVoice;
+
+      const estSec = Math.max(4, Math.round(text.split(/\s+/).length / 2.5));
+      setSegmentDuration(estSec);
+      setSegmentCurrentTime(0);
+
+      utterance.onend = () => {
+        if (playbackTokenRef.current !== token) return;
+        if (segmentIdx + 1 < chapter.segments.length) {
+          onAdvance(book, chapterIdx, segmentIdx + 1);
+        } else if (chapterIdx + 1 < book.chapters.length) {
+          onAdvance(book, chapterIdx + 1, 0);
+        } else {
+          setIsPlaying(false);
+          persistProgress({
+            ...book,
+            completed: true,
+            lastPlayedAt: Date.now(),
+          });
+        }
+      };
+
+      utterance.onerror = (ev) => {
+        if (ev.error === "interrupted" || ev.error === "canceled") return;
+        if (playbackTokenRef.current !== token) return;
+        setIsPlaying(false);
+      };
+
+      setIsPlaying(true);
+      window.speechSynthesis.speak(utterance);
+    },
+    [persistProgress, stopDeviceSpeech]
   );
 
   const loadAndPlaySegment = useCallback(
@@ -147,14 +265,20 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
       chapterIdx: number,
       segmentIdx: number,
       shouldAutoPlay: boolean,
-      seekSeconds?: number
+      seekSeconds?: number,
+      forceDeviceVoice?: boolean
     ) => {
       const audio = audioRef.current;
       if (!audio) return;
 
+      if (prefetchTimerRef.current !== null) {
+        window.clearTimeout(prefetchTimerRef.current);
+        prefetchTimerRef.current = null;
+      }
+
       const token = ++playbackTokenRef.current;
       setError(null);
-      setIsBuffering(true);
+      setIsQuotaError(false);
       setSegmentCurrentTime(0);
       setSegmentDuration(0);
 
@@ -168,6 +292,24 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
       persistProgress(updatedBook);
 
       audio.pause();
+      stopDeviceSpeech();
+
+      const activeDeviceMode = forceDeviceVoice ?? useDeviceVoiceRef.current;
+      if (activeDeviceMode) {
+        speakWithDeviceVoice(
+          updatedBook,
+          chapterIdx,
+          segmentIdx,
+          shouldAutoPlay,
+          token,
+          (b, nCh, nSeg) => {
+            void loadAndPlaySegment(b, nCh, nSeg, true, undefined, true);
+          }
+        );
+        return;
+      }
+
+      setIsBuffering(true);
 
       try {
         const url = await fetchSegmentUrl(
@@ -198,13 +340,14 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
           await audio.play();
           if (playbackTokenRef.current !== token) return;
           setIsPlaying(true);
-          prefetchNext(updatedBook, chapterIdx, segmentIdx);
+          prefetchNext(updatedBook, chapterIdx, segmentIdx, token);
         } else {
           setIsPlaying(false);
         }
       } catch (err: unknown) {
         if (playbackTokenRef.current !== token) return;
         setIsPlaying(false);
+        setIsQuotaError(err instanceof TtsQuotaError);
         setError(
           err instanceof Error
             ? err.message
@@ -216,7 +359,13 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
         }
       }
     },
-    [fetchSegmentUrl, persistProgress, prefetchNext]
+    [
+      fetchSegmentUrl,
+      persistProgress,
+      prefetchNext,
+      speakWithDeviceVoice,
+      stopDeviceSpeech,
+    ]
   );
 
   // Wire HTMLAudioElement event listeners
@@ -292,7 +441,10 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
       );
       const chapter = book.chapters[safeChapter];
       const safeSegment = chapter
-        ? Math.min(Math.max(0, book.currentSegmentIndex), chapter.segments.length - 1)
+        ? Math.min(
+            Math.max(0, book.currentSegmentIndex),
+            chapter.segments.length - 1
+          )
         : 0;
 
       void loadAndPlaySegment(book, safeChapter, safeSegment, autoPlay);
@@ -305,7 +457,28 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
     const audio = audioRef.current;
     if (!book || !audio) return;
 
+    if (useDeviceVoiceRef.current) {
+      if (isPlaying) {
+        stopDeviceSpeech();
+        setIsPlaying(false);
+      } else {
+        void loadAndPlaySegment(
+          book,
+          book.currentChapterIndex,
+          book.currentSegmentIndex,
+          true,
+          undefined,
+          true
+        );
+      }
+      return;
+    }
+
     if (isPlaying) {
+      if (prefetchTimerRef.current !== null) {
+        window.clearTimeout(prefetchTimerRef.current);
+        prefetchTimerRef.current = null;
+      }
       audio.pause();
       setIsPlaying(false);
       return;
@@ -316,7 +489,12 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
         audio.playbackRate = book.playbackSpeed;
         await audio.play();
         setIsPlaying(true);
-        prefetchNext(book, book.currentChapterIndex, book.currentSegmentIndex);
+        prefetchNext(
+          book,
+          book.currentChapterIndex,
+          book.currentSegmentIndex,
+          playbackTokenRef.current
+        );
       } catch {
         void loadAndPlaySegment(
           book,
@@ -333,7 +511,7 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
         true
       );
     }
-  }, [isPlaying, loadAndPlaySegment, prefetchNext]);
+  }, [isPlaying, loadAndPlaySegment, prefetchNext, stopDeviceSpeech]);
 
   const jumpToChapter = useCallback(
     (chapterIndex: number, autoPlay = true) => {
@@ -351,7 +529,11 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
       const book = activeBookRef.current;
       if (!book) return;
       const chapter = book.chapters[book.currentChapterIndex];
-      if (!chapter || segmentIndex < 0 || segmentIndex >= chapter.segments.length) {
+      if (
+        !chapter ||
+        segmentIndex < 0 ||
+        segmentIndex >= chapter.segments.length
+      ) {
         return;
       }
       void loadAndPlaySegment(
@@ -372,6 +554,28 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
 
       const chapter = book.chapters[book.currentChapterIndex];
       if (!chapter) return;
+
+      if (useDeviceVoiceRef.current) {
+        if (delta < 0 && book.currentSegmentIndex > 0) {
+          void loadAndPlaySegment(
+            book,
+            book.currentChapterIndex,
+            book.currentSegmentIndex - 1,
+            isPlaying
+          );
+        } else if (
+          delta > 0 &&
+          book.currentSegmentIndex + 1 < chapter.segments.length
+        ) {
+          void loadAndPlaySegment(
+            book,
+            book.currentChapterIndex,
+            book.currentSegmentIndex + 1,
+            isPlaying
+          );
+        }
+        return;
+      }
 
       const target = audio.currentTime + delta;
 
@@ -436,6 +640,7 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
       const intraRatio = exactIdx - targetSegment;
 
       if (
+        !useDeviceVoiceRef.current &&
         targetSegment === book.currentSegmentIndex &&
         audioRef.current &&
         Number.isFinite(audioRef.current.duration) &&
@@ -464,44 +669,154 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
         audioRef.current.playbackRate = speed;
         audioRef.current.preservesPitch = true;
       }
-      persistProgress({ ...book, playbackSpeed: speed });
+      const updated = { ...book, playbackSpeed: speed };
+      persistProgress(updated);
+      if (useDeviceVoiceRef.current && isPlayingRef.current) {
+        void loadAndPlaySegment(
+          updated,
+          updated.currentChapterIndex,
+          updated.currentSegmentIndex,
+          true,
+          undefined,
+          true
+        );
+      }
     },
-    [persistProgress]
+    [loadAndPlaySegment, persistProgress]
   );
 
   const setVoiceName = useCallback(
     (voiceName: VoiceName) => {
       const book = activeBookRef.current;
-      if (!book || book.voiceName === voiceName) return;
+      if (!book) return;
+      setUseDeviceVoice(false);
+      useDeviceVoiceRef.current = false;
+      quotaExhaustedRef.current = false;
       const updated = { ...book, voiceName };
       void loadAndPlaySegment(
         updated,
         updated.currentChapterIndex,
         updated.currentSegmentIndex,
-        isPlaying
+        isPlaying,
+        undefined,
+        false
       );
     },
     [isPlaying, loadAndPlaySegment]
   );
 
-  const clearActiveBookIfDeleted = useCallback((deletedId: string) => {
-    if (activeBookRef.current?.id === deletedId) {
-      playbackTokenRef.current++;
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.src = "";
-      }
-      setIsPlaying(false);
-      setIsBuffering(false);
-      setActiveBook(null);
+  const enableDeviceVoiceFallback = useCallback(() => {
+    const book = activeBookRef.current;
+    if (!book) return;
+    setUseDeviceVoice(true);
+    useDeviceVoiceRef.current = true;
+    setError(null);
+    setIsQuotaError(false);
+    void loadAndPlaySegment(
+      book,
+      book.currentChapterIndex,
+      book.currentSegmentIndex,
+      true,
+      undefined,
+      true
+    );
+  }, [loadAndPlaySegment]);
+
+  const disableDeviceVoiceFallback = useCallback(() => {
+    const book = activeBookRef.current;
+    stopDeviceSpeech();
+    setUseDeviceVoice(false);
+    useDeviceVoiceRef.current = false;
+    quotaExhaustedRef.current = false;
+    if (book) {
+      void loadAndPlaySegment(
+        book,
+        book.currentChapterIndex,
+        book.currentSegmentIndex,
+        true,
+        undefined,
+        false
+      );
     }
-  }, []);
+  }, [loadAndPlaySegment, stopDeviceSpeech]);
+
+  const clearActiveBookIfDeleted = useCallback(
+    (deletedId: string) => {
+      if (activeBookRef.current?.id === deletedId) {
+        playbackTokenRef.current++;
+        stopDeviceSpeech();
+        if (audioRef.current) {
+          audioRef.current.pause();
+          audioRef.current.src = "";
+        }
+        setIsPlaying(false);
+        setIsBuffering(false);
+        setActiveBook(null);
+      }
+    },
+    [stopDeviceSpeech]
+  );
+
+  // Android / OS Lock-Screen & Notification Controls via Media Session API
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) {
+      return;
+    }
+
+    if (!activeBook) {
+      navigator.mediaSession.metadata = null;
+      navigator.mediaSession.playbackState = "none";
+      return;
+    }
+
+    const chapter =
+      activeBook.chapters[activeBook.currentChapterIndex] ??
+      activeBook.chapters[0];
+
+    const artwork: MediaImage[] = activeBook.coverUrl
+      ? [{ src: activeBook.coverUrl, sizes: "512x512", type: "image/jpeg" }]
+      : [{ src: "/pwa-512x512.png", sizes: "512x512", type: "image/png" }];
+
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: chapter?.title || activeBook.title,
+      artist: activeBook.author || "VozLivro",
+      album: activeBook.title,
+      artwork,
+    });
+
+    navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
+
+    navigator.mediaSession.setActionHandler("play", () => {
+      if (!isPlayingRef.current) void togglePlayPause();
+    });
+    navigator.mediaSession.setActionHandler("pause", () => {
+      if (isPlayingRef.current) void togglePlayPause();
+    });
+    navigator.mediaSession.setActionHandler("seekbackward", () => {
+      skipSeconds(-15);
+    });
+    navigator.mediaSession.setActionHandler("seekforward", () => {
+      skipSeconds(15);
+    });
+    navigator.mediaSession.setActionHandler("previoustrack", () => {
+      if (activeBook.currentChapterIndex > 0) {
+        jumpToChapter(activeBook.currentChapterIndex - 1, true);
+      }
+    });
+    navigator.mediaSession.setActionHandler("nexttrack", () => {
+      if (activeBook.currentChapterIndex + 1 < activeBook.chapters.length) {
+        jumpToChapter(activeBook.currentChapterIndex + 1, true);
+      }
+    });
+  }, [activeBook, isPlaying, togglePlayPause, skipSeconds, jumpToChapter]);
 
   return {
     activeBook,
     isPlaying,
     isBuffering,
     error,
+    isQuotaError,
+    useDeviceVoice,
     segmentCurrentTime,
     segmentDuration,
     openBook,
@@ -512,7 +827,12 @@ export function useAudiobookPlayer({ onBookUpdated }: UseAudiobookPlayerOptions)
     scrubChapterRatio,
     setPlaybackSpeed,
     setVoiceName,
+    enableDeviceVoiceFallback,
+    disableDeviceVoiceFallback,
     clearActiveBookIfDeleted,
-    clearError: () => setError(null),
+    clearError: () => {
+      setError(null);
+      setIsQuotaError(false);
+    },
   };
 }

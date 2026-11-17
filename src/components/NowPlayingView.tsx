@@ -29,6 +29,8 @@ interface NowPlayingViewProps {
   isPlaying: boolean;
   isBuffering: boolean;
   error: string | null;
+  isQuotaError: boolean;
+  useDeviceVoice: boolean;
   segmentCurrentTime: number;
   segmentDuration: number;
   isDark: boolean;
@@ -41,6 +43,8 @@ interface NowPlayingViewProps {
   onJumpToSegment: (segmentIndex: number) => void;
   onSpeedChange: (speed: number) => void;
   onVoiceChange: (voice: VoiceName) => void;
+  onEnableDeviceVoice: () => void;
+  onDisableDeviceVoice: () => void;
   onOpenChapters: () => void;
   onClearError: () => void;
 }
@@ -50,6 +54,8 @@ export function NowPlayingView({
   isPlaying,
   isBuffering,
   error,
+  isQuotaError,
+  useDeviceVoice,
   segmentCurrentTime,
   segmentDuration,
   isDark,
@@ -62,6 +68,8 @@ export function NowPlayingView({
   onJumpToSegment,
   onSpeedChange,
   onVoiceChange,
+  onEnableDeviceVoice,
+  onDisableDeviceVoice,
   onOpenChapters,
   onClearError,
 }: NowPlayingViewProps) {
@@ -236,14 +244,38 @@ export function NowPlayingView({
           <main className="thin-scrollbar flex-1 overflow-y-auto px-6 py-10 sm:px-12 lg:py-14">
             <div className="mx-auto max-w-2xl">
               {error && (
-                <div className="mb-6 flex items-center justify-between gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-xs text-red-700 dark:text-red-300">
-                  <span>{error}</span>
+                <div className="mb-6 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-xs leading-relaxed text-red-700 dark:text-red-300">
+                  <div className="flex items-start justify-between gap-3">
+                    <span>{error}</span>
+                    <button
+                      type="button"
+                      onClick={onClearError}
+                      className="shrink-0 font-medium underline"
+                    >
+                      Fechar
+                    </button>
+                  </div>
+                  {isQuotaError && !useDeviceVoice && (
+                    <button
+                      type="button"
+                      onClick={onEnableDeviceVoice}
+                      className="mt-2.5 inline-flex min-h-[34px] items-center rounded-lg bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-neutral-800 dark:bg-white dark:text-neutral-950 dark:hover:bg-neutral-200"
+                    >
+                      Continuar ouvindo com voz do dispositivo
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {useDeviceVoice && (
+                <div className="mb-5 flex items-center justify-between gap-3 rounded-xl border border-neutral-300 bg-neutral-200/60 px-4 py-2.5 text-xs text-neutral-700 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-300">
+                  <span>Usando voz local do dispositivo (sem limite de cota).</span>
                   <button
                     type="button"
-                    onClick={onClearError}
+                    onClick={onDisableDeviceVoice}
                     className="shrink-0 font-medium underline"
                   >
-                    Fechar
+                    Tentar voz neural
                   </button>
                 </div>
               )}
@@ -304,7 +336,7 @@ export function NowPlayingView({
                 aria-label="Progresso do capítulo"
                 className="scrub-slider h-4 flex-1 text-neutral-900 dark:text-white"
                 style={{
-                  background: `linear-gradient(to right, ${
+                  backgroundImage: `linear-gradient(to right, ${
                     isDark ? "#ffffff" : "#171717"
                   } ${chapterProgress * 100}%, ${
                     isDark ? "rgba(255,255,255,0.2)" : "rgba(0,0,0,0.16)"
@@ -548,14 +580,38 @@ export function NowPlayingView({
         {/* Lower Player Console */}
         <div className="mt-4 w-full">
           {error && (
-            <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-red-500/30 bg-red-500/15 px-3.5 py-2.5 text-xs text-red-900 dark:text-red-200">
-              <span>{error}</span>
+            <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/15 px-3.5 py-2.5 text-xs leading-relaxed text-red-900 dark:text-red-200">
+              <div className="flex items-start justify-between gap-3">
+                <span>{error}</span>
+                <button
+                  type="button"
+                  onClick={onClearError}
+                  className="shrink-0 font-medium underline"
+                >
+                  Fechar
+                </button>
+              </div>
+              {isQuotaError && !useDeviceVoice && (
+                <button
+                  type="button"
+                  onClick={onEnableDeviceVoice}
+                  className="mt-2.5 inline-flex min-h-[34px] items-center rounded-lg bg-neutral-950 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-neutral-800 dark:bg-white dark:text-neutral-950 dark:hover:bg-neutral-200"
+                >
+                  Continuar ouvindo com voz do dispositivo
+                </button>
+              )}
+            </div>
+          )}
+
+          {useDeviceVoice && (
+            <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-black/10 bg-black/10 px-3.5 py-2 text-xs text-neutral-800 dark:border-white/15 dark:bg-white/10 dark:text-white/80">
+              <span>Voz local do dispositivo</span>
               <button
                 type="button"
-                onClick={onClearError}
+                onClick={onDisableDeviceVoice}
                 className="shrink-0 font-medium underline"
               >
-                Fechar
+                Voltar para voz neural
               </button>
             </div>
           )}
@@ -580,7 +636,7 @@ export function NowPlayingView({
               aria-label="Progresso do capítulo"
               className="scrub-slider h-5 w-full text-neutral-900 dark:text-white"
               style={{
-                background: `linear-gradient(to right, ${
+                backgroundImage: `linear-gradient(to right, ${
                   isDark ? "#ffffff" : "#171717"
                 } ${chapterProgress * 100}%, ${
                   isDark ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.18)"

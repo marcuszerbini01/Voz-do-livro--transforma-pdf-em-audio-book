@@ -458,7 +458,7 @@ export function splitChapterIntoSegments(chapterText: string): string[] {
     .filter(Boolean);
 
   const segments: string[] = [];
-  const TARGET_MAX = 480;
+  const TARGET_MAX = 1500;
 
   for (const para of paragraphs) {
     if (para.length <= TARGET_MAX) {

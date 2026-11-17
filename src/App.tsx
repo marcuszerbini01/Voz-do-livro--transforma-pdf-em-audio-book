@@ -16,6 +16,8 @@ import { ChaptersDrawer } from "./components/ChaptersDrawer";
 import { ImportModal } from "./components/ImportModal";
 import { MiniPlayer } from "./components/MiniPlayer";
 import { NowPlayingView } from "./components/NowPlayingView";
+import { OfflineIndicator } from "./components/OfflineIndicator";
+import { PWAInstallButton } from "./components/PWAInstallButton";
 import { useAudiobookPlayer } from "./hooks/useAudiobookPlayer";
 import type { Book, VoiceName } from "./types/book";
 import { formatDurationHuman, getBookProgress } from "./utils/formatters";
@@ -38,7 +40,7 @@ export default function App() {
   const [isPlayerExpanded, setIsPlayerExpanded] = useState(false);
   const [chaptersBookId, setChaptersBookId] = useState<string | null>(null);
 
-  // Sync theme class on <html>
+  // Sync theme class on <html> and PWA status bar theme-color
   useEffect(() => {
     const root = document.documentElement;
     if (isDark) {
@@ -47,6 +49,10 @@ export default function App() {
       root.classList.remove("dark");
     }
     localStorage.setItem("vozlivro_theme", isDark ? "dark" : "light");
+    const themeMeta = document.querySelector('meta[name="theme-color"]');
+    if (themeMeta) {
+      themeMeta.setAttribute("content", isDark ? "#0A0A0B" : "#F7F6F2");
+    }
   }, [isDark]);
 
   // Load persisted books from IndexedDB
@@ -222,24 +228,28 @@ export default function App() {
             </h1>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setIsDark((d) => !d)}
-            aria-label={isDark ? "Mudar para modo claro" : "Mudar para modo escuro"}
-            className="inline-flex min-h-[40px] items-center gap-2 rounded-full border border-neutral-300 bg-white px-4 py-2 text-xs font-medium text-neutral-800 transition-colors hover:bg-neutral-100 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:bg-neutral-800"
-          >
-            {isDark ? (
-              <>
-                <Sun className="h-3.5 w-3.5" />
-                <span>Modo claro</span>
-              </>
-            ) : (
-              <>
-                <Moon className="h-3.5 w-3.5" />
-                <span>Modo noturno</span>
-              </>
-            )}
-          </button>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <PWAInstallButton />
+
+            <button
+              type="button"
+              onClick={() => setIsDark((d) => !d)}
+              aria-label={isDark ? "Mudar para modo claro" : "Mudar para modo escuro"}
+              className="inline-flex min-h-[40px] items-center gap-2 rounded-full border border-neutral-300 bg-white px-4 py-2 text-xs font-medium text-neutral-800 transition-colors hover:bg-neutral-100 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-200 dark:hover:bg-neutral-800"
+            >
+              {isDark ? (
+                <>
+                  <Sun className="h-3.5 w-3.5" />
+                  <span>Modo claro</span>
+                </>
+              ) : (
+                <>
+                  <Moon className="h-3.5 w-3.5" />
+                  <span>Modo noturno</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Library Toolbar (Filter tabs + Search) */}
@@ -447,6 +457,8 @@ export default function App() {
           isPlaying={player.isPlaying}
           isBuffering={player.isBuffering}
           error={player.error}
+          isQuotaError={player.isQuotaError}
+          useDeviceVoice={player.useDeviceVoice}
           segmentCurrentTime={player.segmentCurrentTime}
           segmentDuration={player.segmentDuration}
           isDark={isDark}
@@ -459,6 +471,8 @@ export default function App() {
           onJumpToSegment={(idx) => player.jumpToSegment(idx, true)}
           onSpeedChange={player.setPlaybackSpeed}
           onVoiceChange={player.setVoiceName}
+          onEnableDeviceVoice={player.enableDeviceVoiceFallback}
+          onDisableDeviceVoice={player.disableDeviceVoiceFallback}
           onOpenChapters={() => setChaptersBookId(player.activeBook!.id)}
           onClearError={player.clearError}
         />
@@ -480,6 +494,9 @@ export default function App() {
         onClose={() => setIsImportOpen(false)}
         onImported={(b) => void handleImported(b)}
       />
+
+      {/* Offline Connectivity Indicator */}
+      <OfflineIndicator />
     </div>
   );
 }

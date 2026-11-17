@@ -171,11 +171,18 @@ ${transcript}`;
       res.json(parsed);
     } catch (error: unknown) {
       console.error("Error in /api/analyze-chapters:", error);
-      const message =
+      const rawMsg =
         error instanceof Error
           ? error.message
           : "Erro ao analisar capítulos com IA.";
-      res.status(500).json({ error: message });
+      if (rawMsg.includes("429") || rawMsg.includes("RESOURCE_EXHAUSTED")) {
+        res.status(429).json({
+          error:
+            "Limite de solicitações da API gratuita atingido. Para ampliar sua cota, selecione uma chave com faturamento ativo no painel Settings > Secrets.",
+        });
+        return;
+      }
+      res.status(500).json({ error: rawMsg });
     }
   });
 
@@ -213,32 +220,58 @@ ${transcript}`;
         },
       });
 
-      const response = await aiTts.models.generateContent({
-        model: "gemini-3.8-flash-lite-tts",
-        contents: [
-          {
-            role: "user",
-            parts: [
-              {
-                text: cleanText.slice(0, 1800),
-                speechMetadata: {
-                  style:
-                    style ||
-                    "Narrador de audiolivro natural, claro, envolvente e com ritmo confortável",
+      const callTts = () =>
+        aiTts.models.generateContent({
+          model: "gemini-3.8-flash-lite-tts",
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: cleanText.slice(0, 2400),
+                  speechMetadata: {
+                    style:
+                      style ||
+                      "Narrador de audiolivro natural, claro, envolvente e com ritmo confortável",
+                  },
                 },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: selectedVoice },
               },
-            ],
-          },
-        ],
-        config: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: selectedVoice },
             },
           },
-        },
-      });
+        });
+
+      let response;
+      try {
+        response = await callTts();
+      } catch (firstErr: unknown) {
+        const firstMsg =
+          firstErr instanceof Error ? firstErr.message : String(firstErr);
+        const isPerMinute429 =
+          (firstMsg.includes("429") ||
+            firstMsg.includes("RESOURCE_EXHAUSTED")) &&
+          firstMsg.includes("PerMinute") &&
+          !firstMsg.includes("PerDay");
+
+        if (isPerMinute429) {
+          const retryMatch = firstMsg.match(/"retryDelay":"(\d+)s"/);
+          const delaySec = retryMatch ? Math.min(20, Number(retryMatch[1]) + 1) : 12;
+          console.warn(
+            `[TTS] Limite por minuto atingido; aguardando ${delaySec}s para tentar novamente.`
+          );
+          await new Promise((r) => setTimeout(r, delaySec * 1000));
+          response = await callTts();
+        } else {
+          throw firstErr;
+        }
+      }
 
       const base64Audio =
         response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
@@ -255,10 +288,35 @@ ${transcript}`;
       res.setHeader("Content-Length", wavBuffer.length.toString());
       res.send(wavBuffer);
     } catch (error: unknown) {
-      console.error("Error in /api/tts:", error);
-      const message =
+      const rawMsg =
         error instanceof Error ? error.message : "Erro ao gerar áudio natural.";
-      res.status(500).json({ error: message });
+
+      if (rawMsg.includes("429") || rawMsg.includes("RESOURCE_EXHAUSTED")) {
+        console.warn("[TTS] Quota 429 atingida no plano gratuito.");
+        const isDaily = rawMsg.includes("PerDay");
+        res.status(429).json({
+          error: isDaily
+            ? "Limite diário da API gratuita atingido (10 solicitações/dia para voz neural). Para aumentar a cota, selecione uma chave de API com faturamento ativo no painel Settings > Secrets."
+            : "Muitas solicitações por minuto na API gratuita (máx. 3/min). Aguarde alguns segundos ou selecione uma chave com faturamento ativo em Settings > Secrets.",
+        });
+        return;
+      }
+
+      if (
+        rawMsg.includes("403") ||
+        rawMsg.includes("PERMISSION_DENIED") ||
+        rawMsg.includes("API_KEY_INVALID")
+      ) {
+        console.warn("[TTS] Erro de permissão/chave da API.");
+        res.status(403).json({
+          error:
+            "Chave da API inválida ou sem permissão. Verifique sua chave no painel Settings > Secrets.",
+        });
+        return;
+      }
+
+      console.error("Error in /api/tts:", error);
+      res.status(500).json({ error: rawMsg });
     }
   });
 
